@@ -1,125 +1,168 @@
 #include "KellerLD.h"
-#include <Wire.h>
 
-#define LD_ADDR                     0x40
-#define LD_REQUEST                  0xAC
-#define LD_CUST_ID0                 0x00
-#define LD_CUST_ID1                 0x01
-#define LD_SCALING0                 0x12
-#define LD_SCALING1                 0x13
-#define LD_SCALING2                 0x14
-#define LD_SCALING3                 0x15
-#define LD_SCALING4                 0x16
+KellerLD::KellerLD(int file, uint8_t i2caddr):
+file_(file),
+i2c_addr_(i2caddr)
 
-KellerLD::KellerLD() {
-	fluidDensity = 1029;
+{
+    fluidDensity = 1029;
 }
 
 void KellerLD::init() {
-	// Request memory map information
-	cust_id0 = readMemoryMap(LD_CUST_ID0);
-	cust_id1 = readMemoryMap(LD_CUST_ID1);
+    // Request memory map information
+    cust_id0 = readMemoryMap(LD_CUST_ID0);
+    cust_id1 = readMemoryMap(LD_CUST_ID1);
 
-	code = (uint32_t(cust_id1) << 16) | cust_id0;
-	equipment = cust_id0 >> 10;
-	place = cust_id0 & 0b000000111111111;
-	file = cust_id1;
+    code = (uint32_t(cust_id1) << 16) | cust_id0;
+    equipment = cust_id0 >> 10;
+    place = cust_id0 & 0b000000111111111;
+    file = cust_id1;
 
-	uint16_t scaling0;
-	scaling0 = readMemoryMap(LD_SCALING0);
+    uint16_t scaling0;
+    scaling0 = readMemoryMap(LD_SCALING0);
 
-	mode = scaling0 & 0b00000011;
-	year = scaling0 >> 11;
-	month = (scaling0 & 0b0000011110000000) >> 7;
-	day = (scaling0 & 0b0000000001111100) >> 2;
+    mode = scaling0 & 0b00000011;
+    year = scaling0 >> 11;
+    month = (scaling0 & 0b0000011110000000) >> 7;
+    day = (scaling0 & 0b0000000001111100) >> 2;
 	
-	// handle P-mode pressure offset (to vacuum pressure)
+    // handle P-mode pressure offset (to vacuum pressure)
+    if (mode == 0) { 
+        // PA mode, Vented Gauge. Zero at atmospheric pressure
+        P_mode = 1.01325;
+    } else if (mode == 1) {
+        // PR mode, Sealed Gauge. Zero at 1.0 bar
+        P_mode = 1.0;
+    } else {
+        // PAA mode, Absolute. Zero at vacuum
+        // (or undefined mode)
+        P_mode = 0;
+    }
 
-	if (mode == 0) { 
-		// PA mode, Vented Gauge. Zero at atmospheric pressure
-		P_mode = 1.01325;
-	} else if (mode == 1) {
-		// PR mode, Sealed Gauge. Zero at 1.0 bar
-		P_mode = 1.0;
-	} else {
-		// PAA mode, Absolute. Zero at vacuum
-		// (or undefined mode)
-		P_mode = 0;
-	}
+    uint32_t scaling12 = (uint32_t(readMemoryMap(LD_SCALING1)) << 16) | readMemoryMap(LD_SCALING2);
+    P_min = *reinterpret_cast<float*>(&scaling12);
+    uint32_t scaling34 = (uint32_t(readMemoryMap(LD_SCALING3)) << 16) | readMemoryMap(LD_SCALING4);
+    P_max = *reinterpret_cast<float*>(&scaling34);
 
-	uint32_t scaling12 = (uint32_t(readMemoryMap(LD_SCALING1)) << 16) | readMemoryMap(LD_SCALING2);
+}
 
-	P_min = *reinterpret_cast<float*>(&scaling12);
-
-	uint32_t scaling34 = (uint32_t(readMemoryMap(LD_SCALING3)) << 16) | readMemoryMap(LD_SCALING4);
-
-	P_max = *reinterpret_cast<float*>(&scaling34);
+bool KellerLD::scan()
+{
+    if (ioctl(file_, I2C_SLAVE, i2c_addr_) < 0) 
+        return false;
+    else return true;
 }
 
 void KellerLD::setFluidDensity(float density) {
-	fluidDensity = density;
+    fluidDensity = density;
 }
 
-void KellerLD::read() {
-	uint8_t status;
 
-	Wire.beginTransmission(LD_ADDR);
-	Wire.write(LD_REQUEST);
-	Wire.endTransmission();
+uint8_t KellerLD::read_request() {
+    uint8_t buffer[3];
+    memset(buffer,'\0',3);
+    int n_writ = 0;
 
-	delay(9); // Max conversion time per datasheet
+    buffer[0] = LD_REQUEST;
+    n_writ = write(file_,buffer,1);
+    if (n_writ != 1)
+    {
+        printf("Failed to write 1 byte to the i2c bus.\n");
+        return 99;
+    }
+    return 1;
+}
 
- 	Wire.requestFrom(LD_ADDR,5);
-	status = Wire.read();
-	P = (Wire.read() << 8) | Wire.read();
-	uint16_t T = (Wire.read() << 8) | Wire.read();
-	
-	P_bar = (float(P)-16384)*(P_max-P_min)/32768 + P_min + P_mode;
-	T_degc = ((T>>4)-24)*0.05-50;
+uint8_t KellerLD::read_data() {
+    uint8_t status;
+    uint8_t buffer[5];
+    memset(buffer,'\0',5);
+    int n_read = 0;
+    n_read = read(file_,buffer,5);
+    if (n_read != 5) 
+    {
+        printf("Failed to read 5 bytes from the i2c bus.\n");
+        return 99;
+    }
+    else
+    {
+        status = buffer[0];
+		P = ((uint16_t)buffer[1] << 8) | (uint16_t)buffer[2];
+        uint16_t T = ((uint16_t)buffer[3] << 8) | (uint16_t)buffer[4];
+
+        P_bar = (float(P)-16384)*(P_max-P_min)/32768 + P_min + P_mode;
+        T_degc = ((T>>4)-24)*0.05-50;
+        return status;
+    }
+
 }
 
 uint16_t KellerLD::readMemoryMap(uint8_t mtp_address) {
-	uint8_t status;
+    uint8_t status;
+    uint8_t buffer[3];
+    memset(buffer,'\0',3);
+    int n_writ = 0;
 
-	Wire.beginTransmission(LD_ADDR);
-	Wire.write(mtp_address);
-	Wire.endTransmission();
+    buffer[0] = mtp_address;
 
-	delay(1); // allow for response to come in
+    n_writ = write(file_,buffer,1);
+    if (n_writ != 1)
+    {
+        status = 98;
+        printf("Failed to write 1 to the i2c bus.\n");
+        return 0;
+    }
 
-	Wire.requestFrom(LD_ADDR,3);
-	status = Wire.read();
-	return ((Wire.read() << 8) | Wire.read());
+    usleep(1000);
+    memset(buffer,'\0',3);
+    int n_read = 0;
+    n_read = read(file_,buffer,3);
+
+    if (n_read != 3)
+    {
+       status = 99;
+       printf("Failed to read 3 bytes from the i2c bus.\n");
+       return 0;
+    }
+    else
+    {
+      status = buffer[0];
+      uint16_t data = ((uint16_t)buffer[1] << 8) | (uint16_t)buffer[2];
+      return data;
+    }
+
+    (void)status;
 }
 
 bool KellerLD::status() {
-	if (equipment <= 62 ) {
-		return true;
-	} else {
-		return false;
-	}
+    if (equipment <= 62 ) {
+        return true;
+    } else {
+        return false;
+    }
 }
 
 float KellerLD::range() {
-	return P_max-P_min;
+    return P_max-P_min;
 }
 
 float KellerLD::pressure(float conversion) {
-	return P_bar*1000.0f*conversion;
+    return P_bar*1000.0f*conversion;
 }
 
 float KellerLD::temperature() {
-	return T_degc;
+    return T_degc;
 }
 
 float KellerLD::depth() {
-	return (pressure(KellerLD::Pa)-101325)/(fluidDensity*9.80665);
+    return (pressure(KellerLD::Pa)-101325)/(fluidDensity*9.80665);
 }
 
 float KellerLD::altitude() {
-	return (1-pow((pressure()/1013.25),0.190284))*145366.45*.3048;
+    return (1-std::pow((pressure()/1013.25),0.190284))*145366.45*.3048;
 }
 
 bool KellerLD::isInitialized() {
-	return (cust_id0 >> 10) != 63; // If not connected, equipment code == 63
+    //printf("cust_id0: %d\n", (cust_id0 >> 10));
+    return (cust_id0 >> 10 !=27) ? false : true;
 }

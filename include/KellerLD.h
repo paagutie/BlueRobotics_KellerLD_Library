@@ -32,10 +32,37 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 -------------------------------*/ 
 
+/* modified by Pablo Gutiérrez F. (MARUM - University of Bremen) */
+
 #ifndef KELLERLD_H_BLUEROBOTICS
 #define KELLERLD_H_BLUEROBOTICS
 
-#include "Arduino.h"
+#include <stdio.h>
+#include <math.h>
+#include <sys/types.h>
+#include <stdlib.h>
+#include <cstdint>
+
+#include <iostream>
+#include <time.h>
+#include <stdint.h>
+#include <string.h>
+
+#include <unistd.h>
+#include <linux/i2c-dev.h>
+#include <sys/ioctl.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+
+#define LD_ADDR                     0x40
+#define LD_REQUEST                  0xAC
+#define LD_CUST_ID0                 0x00
+#define LD_CUST_ID1                 0x01
+#define LD_SCALING0                 0x12
+#define LD_SCALING1                 0x13
+#define LD_SCALING2                 0x14
+#define LD_SCALING3                 0x15
+#define LD_SCALING4                 0x16
 
 class KellerLD {
 public:
@@ -43,21 +70,22 @@ public:
 	static constexpr float bar = 0.001f;
 	static constexpr float mbar = 1.0f;
 
-	KellerLD();
+	KellerLD(int file, uint8_t i2caddr);
 
   /** Reads the onboard memory map to determine min and max pressure as 
    *  well as manufacture date, mode, and customer ID.
    */
 	void init();
 
+	bool scan();
+
 	/** Provide the density of the working fluid in kg/m^3. Default is for 
 	 * seawater. Should be 997 for freshwater.
 	 */
 	void setFluidDensity(float density);
 
-	/** The read from I2C takes up for 40 ms, so use sparingly is possible.
-	 */
-	void read();
+	uint8_t read_request();
+    uint8_t read_data();
 
 	/** Checks if the attached sensor is connectored or not. */
 	bool status();
@@ -103,6 +131,8 @@ public:
 	float P_max;
 
 private:
+	int file_;
+	uint8_t i2c_addr_;
 	float fluidDensity;
 	float T_degc;
 
@@ -112,4 +142,4 @@ private:
 	uint16_t readMemoryMap(uint8_t mtp_address);
 };
 
-#endif
+#endif //KELLERLD_H_BLUEROBOTICS
